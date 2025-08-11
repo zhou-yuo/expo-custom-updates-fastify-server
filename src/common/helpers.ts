@@ -42,16 +42,18 @@ export async function getPrivateKeyAsync() {
 
 // 同步获取运行时版本的最新更新包路径
 export async function getLatestUpdateBundlePathForRuntimeVersionAsync(runtimeVersion: string) {
-  console.log(`[调试信息] 正在检查的运行时版本是: "${runtimeVersion}"`);
   const updatesDirectoryForRuntimeVersion = `updates/${runtimeVersion}`;
+  // 判断路径是否存在
   if (!fsSync.existsSync(updatesDirectoryForRuntimeVersion)) {
     throw new Error('Unsupported runtime version');
   }
 
+  // 读取路径所有文件，倒叙排序
   const filesInUpdatesDirectory = await fs.readdir(updatesDirectoryForRuntimeVersion);
   const directoriesInUpdatesDirectory = (
     await Promise.all(
       filesInUpdatesDirectory.map(async (file) => {
+        // 检查文件是否存在
         const fileStat = await fs.stat(path.join(updatesDirectoryForRuntimeVersion, file));
         return fileStat.isDirectory() ? file : null;
       })
@@ -80,6 +82,7 @@ type GetAssetMetadataArg =
       platform: string;
     };
 
+// 获取资产元数据
 export async function getAssetMetadataAsync(arg: GetAssetMetadataArg) {
   const assetFilePath = `${arg.updateBundlePath}/${arg.filePath}`;
   const asset = await fs.readFile(path.resolve(assetFilePath), null);
@@ -119,6 +122,12 @@ export async function createNoUpdateAvailableDirectiveAsync() {
   };
 }
 
+/**
+ * 获取 metadata 数据
+ * @param updateBundlePath 更新包的路径
+ * @param runtimeVersion 运行时版本（updates下的 目录app）
+ * @returns 更新包里的 metadata.json 数据
+ */
 export async function getMetadataAsync({
   updateBundlePath,
   runtimeVersion,
@@ -128,6 +137,7 @@ export async function getMetadataAsync({
 }) {
   try {
     const metadataPath = `${updateBundlePath}/metadata.json`;
+    // 读取 更新包里的 metadata.json 文件
     const updateMetadataBuffer = await fs.readFile(path.resolve(metadataPath), null);
     const metadataJson = JSON.parse(updateMetadataBuffer.toString('utf-8'));
     const metadataStat = await fs.stat(metadataPath);

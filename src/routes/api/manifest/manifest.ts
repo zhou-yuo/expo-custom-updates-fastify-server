@@ -22,11 +22,10 @@ const manifest: FastifyPluginAsync = async (fastify, opts): Promise<void> => {
     "/",
     async function (request: FastifyRequest, reply: FastifyReply) {
       try {
-        // 1. 从 request.headers 和 request.query 获取参数
+        // 从 request.headers 和 request.query 获取参数
         const protocolVersionMaybeArray = request.headers[
           "expo-protocol-version"
         ] as string | string[] | undefined;
-        console.log(`expo-protocol-version ${protocolVersionMaybeArray}`);
         if (
           protocolVersionMaybeArray &&
           Array.isArray(protocolVersionMaybeArray)
@@ -35,34 +34,37 @@ const manifest: FastifyPluginAsync = async (fastify, opts): Promise<void> => {
             error: `Unsupported protocol version. Expected either 0 or 1.`,
           });
         }
+        // protocolVersion 参数用于指定和协商客户端（您的 App）与更新服务器之间通信所使用的 Expo Updates 协议的版本。这确保了客户端和服务器能够相互理解对方发送的数据格式和规则。
+        // 兼容旧版本的客户端，目前该协议的版本主要有 0 和 1，默认 1。
         const protocolVersion = parseInt(protocolVersionMaybeArray ?? "0", 10);
 
         const platform = (request.headers["expo-platform"] ??
           (request.query as any)["platform"]) as string;
-        console.log(`platform ${platform}`);
         if (platform !== "ios" && platform !== "android") {
           return reply.code(400).send({
             error: `Unsupported platform. Expected either ios or android.`,
           });
         }
 
+        // 必须是与客户端兼容的运行时版本。运行时版本规定了客户端正在运行的本地代码配置。它应该在构建客户端时设置。例如，在iOS客户端中，该值可能设置在plist文件中。
+        // 默认 app
         const runtimeVersion = (request.headers["expo-runtime-version"] ??
           (request.query as any)["runtime-version"]) as string;
-        console.log(`runtime-version ${runtimeVersion}`);
         if (!runtimeVersion || typeof runtimeVersion !== "string") {
           return reply.code(400).send({ error: `No runtimeVersion provided.` });
         }
 
         try {
-          // 2. 所有业务逻辑完全复用
+          // 最新最新更新包路径（按文件夹名称倒叙）
           const updateBundlePath =
             await getLatestUpdateBundlePathForRuntimeVersionAsync(
               runtimeVersion
             );
-          const updateType = await getTypeOfUpdateAsync(updateBundlePath); // 假设此函数也已迁移
+          // 获取更新类型（更新/回滚）
+          const updateType = await getTypeOfUpdateAsync(updateBundlePath); 
 
           if (updateType === UpdateType.NORMAL_UPDATE) {
-            // 3. 调用我们适配过的函数
+            // 正常更新
             await putUpdateInResponseAsync(
               request,
               reply,
@@ -72,7 +74,7 @@ const manifest: FastifyPluginAsync = async (fastify, opts): Promise<void> => {
               protocolVersion
             );
           } else {
-            // ... 处理回滚等情况
+            // 回滚
             await putRollBackInResponseAsync(
               request,
               reply,
@@ -82,6 +84,7 @@ const manifest: FastifyPluginAsync = async (fastify, opts): Promise<void> => {
           }
         } catch (maybeNoUpdateAvailableError) {
           if (maybeNoUpdateAvailableError instanceof NoUpdateAvailableError) {
+            // 无更新可用
             await putNoUpdateAvailableInResponseAsync(
               request,
               reply,
@@ -112,6 +115,7 @@ async function getTypeOfUpdateAsync(
   updateBundlePath: string
 ): Promise<UpdateType> {
   const directoryContents = await fs.readdir(updateBundlePath);
+  // 文件名中是否有 rollback
   return directoryContents.includes("rollback")
     ? UpdateType.ROLLBACK
     : UpdateType.NORMAL_UPDATE;
@@ -127,6 +131,7 @@ async function putUpdateInResponseAsync(
   protocolVersion: number
 ): Promise<void> {
   const currentUpdateId = request.headers["expo-current-update-id"];
+  // 获取 metadata 数据
   const { metadataJson, createdAt, id } = await getMetadataAsync({
     updateBundlePath,
     runtimeVersion,
@@ -141,15 +146,19 @@ async function putUpdateInResponseAsync(
     throw new NoUpdateAvailableError();
   }
 
+  // 获取 更新包 expoConfig.json 数据
   const expoConfig = await getExpoConfigAsync({
     updateBundlePath,
     runtimeVersion,
   });
+  // 特定平台元数据
   const platformSpecificMetadata = metadataJson.fileMetadata[platform];
   const manifest = {
     id: convertSHA256HashToUUID(id),
     createdAt,
     runtimeVersion,
+    // 资产元数据
+    // 应用运行所需的其他资源，比如图片、字体等。
     assets: await Promise.all(
       (platformSpecificMetadata.assets as any[]).map((asset: any) =>
         getAssetMetadataAsync({
@@ -162,6 +171,7 @@ async function putUpdateInResponseAsync(
         })
       )
     ),
+    // 应用启动时必须加载的 JS bundle
     launchAsset: await getAssetMetadataAsync({
       updateBundlePath,
       filePath: platformSpecificMetadata.bundle,
@@ -176,6 +186,7 @@ async function putUpdateInResponseAsync(
     },
   };
 
+  // 密钥校验
   let signature = null;
   const expectSignatureHeader = request.headers["expo-expect-signature"];
   if (expectSignatureHeader) {
@@ -196,10 +207,19 @@ async function putUpdateInResponseAsync(
     signature = serializeDictionary(dictionary);
   }
 
+  // 服务器在生成更新清单（manifest）时，可以附带一个名为 `assetRequestHeaders` 的扩展字段。
+  // 这个字段告诉客户端：“当你接下来要下载清单里列出的这些资源文件时，必须在你发出的每一个下载请求中，都加上我指定的这些 HTTP 请求头。”
+  // 在这段示例代码中，它遍历了所有资源文件，并为每一个文件都指定了一个名为 `test-header`、值为 `test-header-value` 的请求头。
+  // 这里的 `test-header` 本身没有特殊功能**。由于 `custom-expo-updates-server` 是一个用于演示和学习目的的示例项目，这里的 `test-header` 主要起**示例作用**。它向开发者展示了如何使用 `assetRequestHeaders` 机制。
+  // 在真实的生产环境中，这个功能非常有用。你可以用它来实现一些高级功能，例如：
+  // *   **访问控制/鉴权**：可以为每个资源的下载链接动态生成有时效性的授权 Token，并放在请求头中。这样，只有通过你的更新服务器获取清单的合法客户端，才能凭有效的 Token 下载资源，防止资源被盗链。
+  //   *   例如，你可以将 `"test-header": "test-header-value"` 替换为 `"Authorization": "Bearer your-generated-token"`。
+  // *   **缓存控制**：为不同类型的资源指定不同的缓存策略，通过 `Cache-Control` 等请求头来优化 CDN 或客户端的缓存行为。
+  // *   **数据分析**：在请求头中加入一些追踪信息，用于统计分析资源的下载情况。
   const assetRequestHeaders: { [key: string]: object } = {};
   [...manifest.assets, manifest.launchAsset].forEach((asset) => {
     assetRequestHeaders[asset.key] = {
-      "test-header": "test-header-value",
+      "assets-request": "assets-request-value",
     };
   });
 
@@ -224,13 +244,14 @@ async function putUpdateInResponseAsync(
     .header("content-type", `multipart/mixed; boundary=${form.getBoundary()}`);
 
   // Fastify 的 .send() 可以直接处理 Buffer，更简洁
+  // 将一个构建好的表单数据（FormData 对象）转换成一个底层 HTTP 请求所需的原始二进制 Buffer
   reply.send(form.getBuffer());
 }
 
 // 将回滚作为异步响应
 async function putRollBackInResponseAsync(
-  request: FastifyRequest, // <-- 使用 FastifyRequest
-  reply: FastifyReply, // <-- 使用 FastifyReply
+  request: FastifyRequest, 
+  reply: FastifyReply,
   updateBundlePath: string,
   protocolVersion: number
 ): Promise<void> {
@@ -293,9 +314,10 @@ async function putRollBackInResponseAsync(
   reply.send(form.getBuffer());
 }
 
+// 无更新可用
 async function putNoUpdateAvailableInResponseAsync(
-  request: FastifyRequest, // <-- 使用 FastifyRequest
-  reply: FastifyReply, // <-- 使用 FastifyReply
+  request: FastifyRequest, 
+  reply: FastifyReply, 
   protocolVersion: number
 ): Promise<void> {
   if (protocolVersion === 0) {
